@@ -31,12 +31,38 @@ interface CandidateProfile {
   strengths?: string[];
   improvements?: string[];
   lastGeneratedAt?: string | null;
+  skills?: Record<string, unknown>;
+  experiences?: Record<string, unknown>;
+  preferences?: Record<string, unknown>;
 }
 
 interface ChatSessionResponse {
   session_id: number;
   messages: RawChatMessage[];
   profile?: any;
+}
+
+interface MatchResult {
+  matchId: number;
+  jobId: number;
+  company: string;
+  title: string;
+  position: string;
+  location: string;
+  matchScore: number;
+  scoreBreakdown: {
+    tech: number;
+    experience: number;
+    personality: number;
+  };
+  analysis: {
+    summary?: string | null;
+    strengths?: string[];
+    improvements?: string[];
+  };
+  techStacks?: string[];
+  salary?: string | null;
+  deadline?: string | null;
 }
 
 interface QuickAction {
@@ -66,12 +92,22 @@ const normalizeProfile = (raw: any): CandidateProfile | null => {
     return null;
   }
 
+  const toObject = (value: any): Record<string, unknown> => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return {};
+    }
+    return value as Record<string, unknown>;
+  };
+
   return {
     headline: raw.headline ?? undefined,
     summary: raw.summary ?? undefined,
     strengths: Array.isArray(raw.strengths) ? raw.strengths : [],
     improvements: Array.isArray(raw.improvements) ? raw.improvements : [],
     lastGeneratedAt: raw.last_generated_at ?? raw.lastGeneratedAt ?? null,
+    skills: toObject(raw.skills),
+    experiences: toObject(raw.experiences),
+    preferences: toObject(raw.preferences),
   };
 };
 
@@ -84,6 +120,11 @@ function App() {
   const [initializing, setInitializing] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [matches, setMatches] = useState<MatchResult[]>([]);
+  const [matchesLoading, setMatchesLoading] = useState(false);
+  const [matchesError, setMatchesError] = useState<string | null>(null);
+  const [hasFetchedMatches, setHasFetchedMatches] = useState(false);
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const moreMenuRef = useRef<HTMLDivElement | null>(null);
@@ -191,6 +232,70 @@ function App() {
     };
   }, [moreMenuOpen]);
 
+  const loadMatches = useCallback(
+    async (options?: { refresh?: boolean }) => {
+      if (!sessionId) {
+        return;
+      }
+
+      setMatchesLoading(true);
+      setMatchesError(null);
+
+      try {
+        const url = new URL(
+          `${API_BASE}/api/chat/sessions/${sessionId}/matches`
+        );
+        if (options?.refresh) {
+          url.searchParams.set("refresh", "true");
+        }
+
+        const response = await fetch(url.toString());
+        if (!response.ok) {
+          throw new Error("Failed to load matches");
+        }
+
+        const data = await response.json();
+        const items: MatchResult[] = (data.matches ?? []).map((item: any) => ({
+          matchId: item.match_id,
+          jobId: item.job_id,
+          company: item.company,
+          title: item.title,
+          position: item.position,
+          location: item.location,
+          matchScore: Number(item.match_score ?? 0),
+          scoreBreakdown: {
+            tech: Number(item.score_breakdown?.tech ?? 0),
+            experience: Number(item.score_breakdown?.experience ?? 0),
+            personality: Number(item.score_breakdown?.personality ?? 0),
+          },
+          analysis: {
+            summary: item.analysis?.summary ?? null,
+            strengths: Array.isArray(item.analysis?.strengths)
+              ? item.analysis?.strengths
+              : [],
+            improvements: Array.isArray(item.analysis?.improvements)
+              ? item.analysis?.improvements
+              : [],
+          },
+          techStacks: Array.isArray(item.tech_stacks) ? item.tech_stacks : [],
+          salary: item.salary ?? item.salary_text ?? null,
+          deadline: item.deadline ?? null,
+        }));
+
+        setMatches(items);
+      } catch (err) {
+        console.error(err);
+        setMatchesError(
+          "추천을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요."
+        );
+      } finally {
+        setMatchesLoading(false);
+        setHasFetchedMatches(true);
+      }
+    },
+    [sessionId]
+  );
+
   const createSession = useCallback(async () => {
     setInitializing(true);
     setLoading(false);
@@ -198,6 +303,11 @@ function App() {
     setMessages([]);
     setProfile(null);
     setMoreMenuOpen(false);
+    setDetailsOpen(false);
+    setMatches([]);
+    setMatchesError(null);
+    setMatchesLoading(false);
+    setHasFetchedMatches(false);
 
     try {
       const response = await fetch(`${API_BASE}/api/chat/sessions`, {
@@ -231,6 +341,12 @@ function App() {
   useEffect(() => {
     createSession();
   }, [createSession]);
+
+  useEffect(() => {
+    if (detailsOpen && sessionId && !hasFetchedMatches) {
+      loadMatches();
+    }
+  }, [detailsOpen, sessionId, hasFetchedMatches, loadMatches]);
 
   const sendMessage = useCallback(
     async (
@@ -286,6 +402,10 @@ function App() {
         });
 
         setProfile(normalizeProfile(data.profile));
+        setHasFetchedMatches(false);
+        if (detailsOpen) {
+          setMatches([]);
+        }
       } catch (err) {
         console.error(err);
         setMessages((prev) => prev.filter((msg) => msg.id !== tempId));
@@ -298,7 +418,7 @@ function App() {
         textareaRef.current?.focus();
       }
     },
-    [sessionId, loading]
+    [sessionId, loading, detailsOpen]
   );
 
   const handleSend = useCallback(() => {
@@ -334,6 +454,65 @@ function App() {
     },
     [triggerAction]
   );
+
+  const handleToggleDetails = () => {
+    const nextState = !detailsOpen;
+    setDetailsOpen(nextState);
+    if (nextState && !hasFetchedMatches) {
+      loadMatches();
+    }
+  };
+
+  const handleRefreshMatches = () => {
+    loadMatches({ refresh: true });
+  };
+
+  const formatScore = (score: number) => {
+    if (!Number.isFinite(score)) {
+      return "-";
+    }
+    return score > 1 ? `${Math.round(score)}%` : `${Math.round(score * 100)}%`;
+  };
+
+  const formatLabel = (label: string) => label.replace(/_/g, " ");
+
+  const formatDetailValue = (value: unknown): string => {
+    if (value === null || value === undefined) {
+      return "";
+    }
+    if (Array.isArray(value)) {
+      return value
+        .map((item) => (typeof item === "string" ? item : JSON.stringify(item)))
+        .join(", ");
+    }
+    if (typeof value === "object") {
+      return JSON.stringify(value);
+    }
+    return String(value);
+  };
+
+  const renderObjectEntries = (
+    data?: Record<string, unknown>,
+    heading?: string
+  ) => {
+    if (!data || Object.keys(data).length === 0) {
+      return null;
+    }
+
+    return (
+      <div className="detail-subsection">
+        {heading && <h4>{heading}</h4>}
+        <ul>
+          {Object.entries(data).map(([key, value]) => (
+            <li key={key}>
+              <span className="detail-term">{formatLabel(key)}</span>
+              <span className="detail-value">{formatDetailValue(value)}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  };
 
   const formatTime = (iso: string) => {
     const date = new Date(iso);
@@ -429,7 +608,6 @@ function App() {
                 </div>
                 {moreMenuOpen && (
                   <div className="more-menu" role="menu">
-                    <p className="more-menu-title">추가로 할 수 있는 일</p>
                     <ul>
                       {moreActions.map((action) => (
                         <li key={action.id}>
@@ -485,7 +663,18 @@ function App() {
         <aside className={`profile-pane ${profile ? "visible" : ""}`}>
           {profile ? (
             <>
-              <h2>AI 요약</h2>
+              <div className="profile-header">
+                <h2>AI 요약</h2>
+                <button
+                  type="button"
+                  className="detail-toggle"
+                  onClick={handleToggleDetails}
+                  disabled={initializing && !profile.summary}
+                >
+                  {detailsOpen ? "상세 닫기" : "상세 보기"}
+                </button>
+              </div>
+
               {profile.headline && (
                 <p className="headline">{profile.headline}</p>
               )}
@@ -518,6 +707,148 @@ function App() {
                   마지막 업데이트:{" "}
                   {new Date(profile.lastGeneratedAt).toLocaleString("ko-KR")}
                 </p>
+              )}
+
+              {detailsOpen && (
+                <div className="profile-details">
+                  <div className="detail-section">
+                    <h3>분석 근거</h3>
+                    {(() => {
+                      const blocks = [
+                        renderObjectEntries(profile.skills, "핵심 스킬"),
+                        renderObjectEntries(profile.experiences, "주요 경험"),
+                        renderObjectEntries(profile.preferences, "선호 조건"),
+                      ].filter(Boolean) as React.ReactNode[];
+
+                      if (blocks.length > 0) {
+                        return blocks;
+                      }
+
+                      return (
+                        <p className="detail-hint">
+                          아직 분석 근거를 정리하는 중이에요. 조금 더 경험을
+                          들려주시면 더 정확한 요약을 제공할게요.
+                        </p>
+                      );
+                    })()}
+                  </div>
+
+                  <div className="detail-section">
+                    <div className="detail-header">
+                      <h3>추천 직무·공고</h3>
+                      <button
+                        type="button"
+                        className="refresh-button"
+                        onClick={handleRefreshMatches}
+                        disabled={matchesLoading || !sessionId}
+                      >
+                        {matchesLoading ? "새로고침 중..." : "새로 고침"}
+                      </button>
+                    </div>
+
+                    {matchesLoading && matches.length === 0 && (
+                      <p className="detail-hint">추천을 준비하고 있어요...</p>
+                    )}
+
+                    {matchesError && !matchesLoading && (
+                      <p className="detail-error">{matchesError}</p>
+                    )}
+
+                    {!matchesLoading &&
+                      !matchesError &&
+                      matches.length === 0 && (
+                        <p className="detail-hint">
+                          아직 추천을 만들 만큼 정보가 충분하지 않아요. 경험을
+                          조금 더 들려주세요!
+                        </p>
+                      )}
+
+                    {matches.length > 0 && (
+                      <ul className="match-list">
+                        {matches.map((match) => (
+                          <li key={match.matchId} className="match-card">
+                            <div className="match-header">
+                              <div className="match-meta">
+                                <p className="match-title">
+                                  {match.title || match.position || "추천 직무"}
+                                </p>
+                                <p className="match-company">
+                                  {[match.company, match.location]
+                                    .filter(Boolean)
+                                    .join(" • ")}
+                                </p>
+                              </div>
+                              <span className="match-score">
+                                {formatScore(match.matchScore)}
+                              </span>
+                            </div>
+
+                            {match.analysis.summary && (
+                              <p className="match-summary">
+                                {match.analysis.summary}
+                              </p>
+                            )}
+
+                            {match.techStacks &&
+                              match.techStacks.length > 0 && (
+                                <div className="match-tags">
+                                  {match.techStacks.slice(0, 6).map((stack) => (
+                                    <span key={`${match.matchId}-${stack}`}>
+                                      {stack}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+
+                            <div className="match-breakdown">
+                              <span>
+                                기술 {formatScore(match.scoreBreakdown.tech)}
+                              </span>
+                              <span>
+                                경험{" "}
+                                {formatScore(match.scoreBreakdown.experience)}
+                              </span>
+                              <span>
+                                인성{" "}
+                                {formatScore(match.scoreBreakdown.personality)}
+                              </span>
+                            </div>
+
+                            {match.analysis.strengths &&
+                              match.analysis.strengths.length > 0 && (
+                                <ul className="match-strengths">
+                                  {match.analysis.strengths.map(
+                                    (item, index) => (
+                                      <li
+                                        key={`${match.matchId}-strength-${index}`}
+                                      >
+                                        {item}
+                                      </li>
+                                    )
+                                  )}
+                                </ul>
+                              )}
+
+                            {match.analysis.improvements &&
+                              match.analysis.improvements.length > 0 && (
+                                <ul className="match-improvements">
+                                  {match.analysis.improvements.map(
+                                    (item, index) => (
+                                      <li
+                                        key={`${match.matchId}-improvement-${index}`}
+                                      >
+                                        {item}
+                                      </li>
+                                    )
+                                  )}
+                                </ul>
+                              )}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                </div>
               )}
             </>
           ) : (
